@@ -7,56 +7,53 @@ import librosa
 import logging
 import warnings
 import torch
-# Suppress specific warning
+import tempfile
+
+# Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning, module="whisper")
 
 app = Flask(__name__)
 
-# Load the model once to reduce repeated memory usage
-model = whisper.load_model("tiny.en", device="cpu")  # Use a small model for efficiency
+# Load the model once
+model = whisper.load_model("tiny.en", device="cpu")
 
-# Setup logging for debugging purposes
+# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-torch.cuda.is_available = lambda : False
+
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"message": "Whisper AI service is running!"}), 200
 
 @app.route('/transcribe', methods=['POST'])
 def transcribe():
-    # Check if file is present in the request
     if 'file' not in request.files:
-        logger.error("No file provided in the request.")
+        logger.error("No file provided.")
         return jsonify({"error": "No file provided"}), 400
 
     file = request.files['file']
-    logger.info(f"Received file: {file.filename} with MIME type: {file.mimetype}")
+    logger.info(f"Received file: {file.filename}, MIME type: {file.mimetype}")
 
     try:
-        # Read the audio file into memory
-        audio_data, samplerate = sf.read(io.BytesIO(file.read()), dtype="float32")
-        logger.info(f"Audio file loaded. Samplerate: {samplerate}, Length of audio data: {len(audio_data)} samples.")
+        file_data = io.BytesIO(file.read())
 
-        # Resample audio if necessary to 16kHz for Whisper
-        if samplerate != 16000:
-            logger.info(f"Resampling audio from {samplerate} Hz to 16000 Hz...")
-            audio_data = librosa.resample(audio_data, orig_sr=samplerate, target_sr=16000)
+        # Load using librosa
+        audio_data, samplerate = librosa.load(file_data, sr=16000, mono=True)
+        logger.info(f"Loaded audio: {len(audio_data)} samples at {samplerate} Hz")
 
-        # Normalize audio data to ensure consistent levels
-        audio_data = librosa.util.normalize(audio_data)
-        logger.info("Audio normalization complete.")
+        # Save to temporary file
+        with tempfile.NamedTemporaryFile(delete=True, suffix=".wav") as tmpfile:
+            sf.write(tmpfile.name, audio_data, samplerate)
+            logger.info("Temp WAV file created.")
 
-        # Perform transcription using Whisper model
-        logger.info("Starting transcription process with Whisper model...")
-        result = model.transcribe(audio_data)  # Model transcribes directly
-        logger.info(f"Transcription completed: {result['text']}")
+            # Transcribe using Whisper
+            result = model.transcribe(tmpfile.name, fp16=False)
+            logger.info(f"Transcription result: {result['text']}")
 
-        # Return the transcription result
         return jsonify({"text": result['text']})
 
     except Exception as e:
-        logger.error(f"Error during transcription: {e}")
+        logger.error(f"Error: {e}")
         return jsonify({"error": "An error occurred during transcription.", "details": str(e)}), 500
 
 if __name__ == "__main__":
